@@ -21,6 +21,7 @@
 import logging
 
 from openerp import SUPERUSER_ID
+from openerp.exceptions import Warning
 from openerp.osv import orm, fields
 from openerp.tools.translate import _
 
@@ -530,3 +531,50 @@ class StockWarehouse(orm.Model):
                     'transit_out_type_id': out_transit_type,
                     },
                    context=context)
+
+    def _check_resupply(self, cr, uid, warehouse, reception_new, delivery_new, context=None):
+        # due to poor design in base class, we need to redo everything... :-(
+        # treat transit_one_step (not only one_step) as change_to_one
+        if reception_new:
+            old_val = warehouse.reception_steps
+            new_val = reception_new
+            self._check_resupply_supported_steps(new_val, old_val, 'Incoming Shipments')
+            change_to_one, change_to_multiple = self._check_resupply_reception_changes(old_val, new_val)
+            if change_to_one or change_to_multiple:
+                new_location = change_to_one and warehouse.lot_stock_id.id or warehouse.wh_input_stock_loc_id.id
+                self._check_reception_resupply(cr, uid, warehouse, new_location, context=context)
+        if delivery_new:
+            old_val = warehouse.delivery_steps
+            new_val = delivery_new
+            self._check_resupply_supported_steps(new_val, old_val, 'Outgoing Shippings')
+            change_to_one, change_to_multiple = self._check_resupply_delivery_changes(old_val, new_val)
+            if change_to_one or change_to_multiple:
+                new_location = change_to_one and warehouse.lot_stock_id.id or warehouse.wh_output_stock_loc_id.id
+                self._check_delivery_resupply(cr, uid, warehouse, new_location, change_to_multiple, context=context)
+
+    def _check_resupply_reception_changes(self, old_val, new_val):
+        """ treat transit_one_step (not only one_step) as change_to_one """
+        one_steps = ('one_step', 'transit_one_step')
+        change_to_one = (old_val not in one_steps and new_val in one_steps)
+        change_to_multiple = (old_val in one_steps and new_val not in one_steps)
+        return change_to_one, change_to_multiple
+
+    def _check_resupply_delivery_changes(self, old_val, new_val):
+        change_to_one = (old_val != 'ship_only' and new_val == 'ship_only')
+        change_to_multiple = (old_val == 'ship_only' and new_val != 'ship_only')
+        return change_to_one, change_to_multiple
+
+    def _check_resupply_supported_steps(self, new_val, old_val, steps_field):
+        supported_steps = self._supported_steps_out() if steps_field == 'Outgoing Shippings' else self._supported_steps_in()
+        if not (old_val in supported_steps and new_val in supported_steps):
+            raise Warning('Module "Stock Routes Transit" fails to reconfigure resupply warehouses '
+                          'for this %s configuration. Please implement this reconfiguring.' % steps_field)
+
+    def _supported_steps_in(self):
+        """ list explicitly, don't load vals from field -- to catch branches not covered by _check_resupply() """
+        return 'one_step', 'two_steps', 'three_steps', 'transit_one_step', 'transit_two_steps', 'transit_three_steps'
+
+    def _supported_steps_out(self):
+        """ list explicitly, don't load vals from field -- to catch branches not covered by _check_resupply() """
+        # TODO: implement other options too
+        return ('ship_only',)
